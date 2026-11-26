@@ -3,6 +3,7 @@ import {
   Building2,
   Download,
   FileArchive,
+  FileSpreadsheet,
   Loader2,
   RefreshCw,
   Search,
@@ -25,6 +26,11 @@ function csvEscape(v: unknown): string {
   return `"${s.replace(/"/g, '""')}"`;
 }
 
+function metaStr(meta: Record<string, unknown> | undefined, key: string): string {
+  const val = meta?.[key];
+  return typeof val === "string" ? val : "";
+}
+
 export function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [hasAdminClaim, setHasAdminClaim] = useState(false);
@@ -34,6 +40,8 @@ export function AdminDashboard() {
   const [historyRows, setHistoryRows] = useState<QodnHistoryRow[]>([]);
   const [userSearch, setUserSearch] = useState("");
   const [selectedEmail, setSelectedEmail] = useState<string | null>(null);
+  const [companyFilter, setCompanyFilter] = useState<string>("ALL");
+  const [dateRange, setDateRange] = useState<"ALL" | "24H" | "7D" | "30D">("ALL");
   const [actionFilter, setActionFilter] = useState<string>("ALL");
 
   const loadData = useCallback(async () => {
@@ -44,8 +52,8 @@ export function AdminDashboard() {
       setHasAdminClaim(isAdmin);
       const [pRes, uRes, hRes] = await Promise.all([
         fetchAllQodnProfilesAdmin(),
-        fetchAllQodnUsageLogsAdmin(400),
-        fetchAllQodnHistoryAdmin(400),
+        fetchAllQodnUsageLogsAdmin(500),
+        fetchAllQodnHistoryAdmin(500),
       ]);
       if (pRes.error || uRes.error || hRes.error) {
         setErrorMsg(pRes.error || uRes.error || hRes.error || "Unable to load admin data.");
@@ -63,6 +71,22 @@ export function AdminDashboard() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  const profileByEmail = useMemo(() => {
+    const map = new Map<string, QodnProfileRow>();
+    for (const p of profiles) {
+      map.set(p.email.toLowerCase(), p);
+    }
+    return map;
+  }, [profiles]);
+
+  const companies = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of profiles) {
+      if (p.company_name?.trim()) set.add(p.company_name.trim());
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [profiles]);
 
   const userStatsByEmail = useMemo(() => {
     const map = new Map<string, { conversions: number; exports: number; events: number }>();
@@ -84,32 +108,54 @@ export function AdminDashboard() {
 
   const filteredProfiles = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
-    if (!q) return profiles;
-    return profiles.filter(
-      (p) =>
+    return profiles.filter((p) => {
+      if (companyFilter !== "ALL" && (p.company_name || "").trim() !== companyFilter) return false;
+      if (!q) return true;
+      return (
         (p.full_name || "").toLowerCase().includes(q) ||
         (p.email || "").toLowerCase().includes(q) ||
-        (p.company_name || "").toLowerCase().includes(q),
-    );
-  }, [profiles, userSearch]);
+        (p.company_name || "").toLowerCase().includes(q)
+      );
+    });
+  }, [profiles, userSearch, companyFilter]);
 
   const filteredUsageLogs = useMemo(() => {
+    const now = Date.now();
+    const cutoff =
+      dateRange === "24H"
+        ? now - 24 * 60 * 60 * 1000
+        : dateRange === "7D"
+          ? now - 7 * 24 * 60 * 60 * 1000
+          : dateRange === "30D"
+            ? now - 30 * 24 * 60 * 60 * 1000
+            : 0;
+
     return usageLogs.filter((row) => {
+      if (cutoff > 0 && new Date(row.created_at).getTime() < cutoff) return false;
       if (selectedEmail && row.user_email.toLowerCase() !== selectedEmail.toLowerCase()) return false;
+      if (companyFilter !== "ALL") {
+        const prof = profileByEmail.get(row.user_email.toLowerCase());
+        const rowCompany = metaStr(row.metadata, "companyName") || prof?.company_name || "";
+        if (rowCompany.trim() !== companyFilter) return false;
+      }
       if (actionFilter !== "ALL" && row.action !== actionFilter) return false;
       if (userSearch.trim()) {
         const q = userSearch.trim().toLowerCase();
-        const summary = typeof row.metadata?.summary === "string" ? row.metadata.summary : "";
+        const summary = metaStr(row.metadata, "summary");
+        const company = metaStr(row.metadata, "companyName") || profileByEmail.get(row.user_email.toLowerCase())?.company_name || "";
+        const machineId = metaStr(row.metadata, "machineId");
         return (
           row.user_email.toLowerCase().includes(q) ||
           row.action.toLowerCase().includes(q) ||
+          company.toLowerCase().includes(q) ||
+          machineId.toLowerCase().includes(q) ||
           (row.file_name || "").toLowerCase().includes(q) ||
           summary.toLowerCase().includes(q)
         );
       }
       return true;
     });
-  }, [usageLogs, selectedEmail, actionFilter, userSearch]);
+  }, [usageLogs, selectedEmail, companyFilter, dateRange, actionFilter, userSearch, profileByEmail]);
 
   const totalConversions = useMemo(
     () => usageLogs.filter((u) => u.action === "KMZ_CONVERT").length,
@@ -124,20 +170,50 @@ export function AdminDashboard() {
     return profiles.filter((p) => new Date(p.last_sign_in_at).getTime() >= cutoff).length;
   }, [profiles]);
 
-  function handleExportCsv() {
-    const headers = ["Timestamp", "User Email", "Action", "Mode", "File Name", "Entity Count", "Summary"];
+  function handleExportAuditCsv() {
+    const headers = [
+      "Log ID",
+      "Timestamp (UTC)",
+      "User ID",
+      "Full Name",
+      "Company",
+      "User Email",
+      "Action",
+      "Mode",
+      "File Name",
+      "Entity Count",
+      "Origin",
+      "Machine ID",
+      "Platform",
+      "App Version",
+      "EULA Accepted",
+      "Licensor",
+      "Summary",
+    ];
     const lines = [headers.join(",")];
     for (const row of filteredUsageLogs) {
-      const summary = typeof row.metadata?.summary === "string" ? row.metadata.summary : "";
+      const prof = profileByEmail.get(row.user_email.toLowerCase());
+      const fullName = metaStr(row.metadata, "fullName") || prof?.full_name || "";
+      const company = metaStr(row.metadata, "companyName") || prof?.company_name || "";
       lines.push(
         [
+          csvEscape(row.id),
           csvEscape(row.created_at),
+          csvEscape(row.user_id),
+          csvEscape(fullName),
+          csvEscape(company),
           csvEscape(row.user_email),
           csvEscape(row.action),
           csvEscape(row.mode || ""),
           csvEscape(row.file_name || ""),
           csvEscape(row.entity_count ?? 0),
-          csvEscape(summary),
+          csvEscape(metaStr(row.metadata, "origin")),
+          csvEscape(metaStr(row.metadata, "machineId")),
+          csvEscape(metaStr(row.metadata, "platform")),
+          csvEscape(metaStr(row.metadata, "appVersion")),
+          csvEscape(row.metadata?.eulaAccepted === true ? "YES" : ""),
+          csvEscape(metaStr(row.metadata, "licensor") || "Caesar Ian Samulde"),
+          csvEscape(metaStr(row.metadata, "summary")),
         ].join(","),
       );
     }
@@ -145,13 +221,92 @@ export function AdminDashboard() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `qodn-admin-usage-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `qodn-audit-evidence-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleExportUsersCsv() {
+    const headers = [
+      "User ID",
+      "Full Name",
+      "Email",
+      "Company",
+      "Status",
+      "Conversions",
+      "CAD Exports",
+      "Usage Events",
+      "First Registered (UTC)",
+      "Last Sign-In (UTC)",
+    ];
+    const lines = [headers.join(",")];
+    for (const p of filteredProfiles) {
+      const stats = userStatsByEmail.get(p.email.toLowerCase()) || {
+        conversions: 0,
+        exports: 0,
+        events: 0,
+      };
+      lines.push(
+        [
+          csvEscape(p.id),
+          csvEscape(p.full_name || ""),
+          csvEscape(p.email),
+          csvEscape(p.company_name || ""),
+          csvEscape(p.profile_completed ? "Active" : "Onboarding"),
+          csvEscape(stats.conversions),
+          csvEscape(stats.exports),
+          csvEscape(stats.events),
+          csvEscape(p.created_at),
+          csvEscape(p.last_sign_in_at),
+        ].join(","),
+      );
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `qodn-registered-users-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
   return (
     <div className="accountWorkspace">
+      {/* IP & Audit Trail Banner */}
+      <div
+        className="panel"
+        style={{
+          padding: "12px 18px",
+          borderColor: "rgba(22, 163, 74, 0.35)",
+          background: "rgba(22, 163, 74, 0.05)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12.5px", color: "#0f172a" }}>
+          <ShieldCheck size={18} color="#16a34a" />
+          <span>
+            <strong>Immutable Audit &amp; IP Evidence Ledger</strong> — Append-only Supabase log (no API update/delete) •
+            Sole Author &amp; Copyright Owner: <strong>Caesar Ian Samulde</strong>
+          </span>
+        </div>
+        <span
+          style={{
+            fontSize: "11px",
+            fontWeight: 700,
+            padding: "3px 10px",
+            borderRadius: "999px",
+            background: hasAdminClaim ? "rgba(22, 163, 74, 0.14)" : "rgba(245, 158, 11, 0.16)",
+            color: hasAdminClaim ? "#15803d" : "#b45309",
+          }}
+        >
+          {hasAdminClaim ? "Admin RLS Verified" : "Admin Claim Pending"}
+        </span>
+      </div>
+
       {/* Top KPI Cards */}
       <div
         style={{
@@ -171,6 +326,14 @@ export function AdminDashboard() {
         </div>
 
         <div className="panel" style={{ padding: "16px 18px" }}>
+          <div style={{ fontSize: "12px", color: "#64748b", fontWeight: 600 }}>Companies Recorded</div>
+          <div style={{ fontSize: "26px", fontWeight: 800, color: "#0f172a", marginTop: "4px" }}>
+            {companies.length}
+          </div>
+          <div style={{ fontSize: "11.5px", color: "#64748b", marginTop: "2px" }}>Distinct organizations</div>
+        </div>
+
+        <div className="panel" style={{ padding: "16px 18px" }}>
           <div style={{ fontSize: "12px", color: "#64748b", fontWeight: 600 }}>KMZ Conversions</div>
           <div style={{ fontSize: "26px", fontWeight: 800, color: "#0f172a", marginTop: "4px" }}>
             {totalConversions}
@@ -187,13 +350,11 @@ export function AdminDashboard() {
         </div>
 
         <div className="panel" style={{ padding: "16px 18px" }}>
-          <div style={{ fontSize: "12px", color: "#64748b", fontWeight: 600 }}>Total Usage Events</div>
+          <div style={{ fontSize: "12px", color: "#64748b", fontWeight: 600 }}>Audit Events</div>
           <div style={{ fontSize: "26px", fontWeight: 800, color: "#0f172a", marginTop: "4px" }}>
             {usageLogs.length}
           </div>
-          <div style={{ fontSize: "11.5px", color: "#64748b", marginTop: "2px" }}>
-            {hasAdminClaim ? "Admin RLS Verified" : "Own-user scope (admin claim pending)"}
-          </div>
+          <div style={{ fontSize: "11.5px", color: "#64748b", marginTop: "2px" }}>Timestamped in Postgres</div>
         </div>
       </div>
 
@@ -208,16 +369,14 @@ export function AdminDashboard() {
             color: "#92400e",
           }}
         >
-          <strong>Admin RLS Note:</strong> Run{" "}
-          <code>supabase/migrations/20261118010000_add_qodn_admin_rls.sql</code> in Supabase SQL Editor and sign out /
-          sign back in once to refresh your JWT <code>app_metadata.role = &quot;admin&quot;</code> claim so all
-          users&apos; records appear here.
+          <strong>Admin Session Refresh Needed:</strong> Sign out and sign back in once so your JWT refreshes with{" "}
+          <code>app_metadata.role = &quot;admin&quot;</code> and displays all users&apos; records.
         </div>
       )}
 
       {errorMsg && <p className="error">{errorMsg}</p>}
 
-      {/* Controls Toolbar */}
+      {/* Controls Toolbar & Users Directory */}
       <div className="panel" style={{ padding: "16px 20px" }}>
         <div
           style={{
@@ -228,8 +387,8 @@ export function AdminDashboard() {
             flexWrap: "wrap",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <ShieldCheck size={18} color="#16a34a" />
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            <Users size={18} color="#16a34a" />
             <strong style={{ fontSize: "14px", color: "#0f172a" }}>Users &amp; Company Directory</strong>
             {selectedEmail && (
               <button
@@ -245,15 +404,54 @@ export function AdminDashboard() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            <select
+              value={companyFilter}
+              onChange={(e) => setCompanyFilter(e.target.value)}
+              style={{
+                padding: "7px 10px",
+                borderRadius: "8px",
+                border: "1px solid #cbd5e1",
+                fontSize: "12.5px",
+                background: "#fff",
+              }}
+              aria-label="Filter by company"
+            >
+              <option value="ALL">All Companies ({companies.length})</option>
+              {companies.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={dateRange}
+              onChange={(e) => setDateRange(e.target.value as "ALL" | "24H" | "7D" | "30D")}
+              style={{
+                padding: "7px 10px",
+                borderRadius: "8px",
+                border: "1px solid #cbd5e1",
+                fontSize: "12.5px",
+                background: "#fff",
+              }}
+              aria-label="Filter by date range"
+            >
+              <option value="ALL">All Time</option>
+              <option value="24H">Last 24 Hours</option>
+              <option value="7D">Last 7 Days</option>
+              <option value="30D">Last 30 Days</option>
+            </select>
+
             <div className="activitySearchBox">
               <Search size={15} color="#64748b" />
               <input
                 type="text"
-                placeholder="Search user, email, company, file..."
+                placeholder="Search user, email, company, file, machine..."
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
               />
             </div>
+
             <button
               type="button"
               className="secondaryButton"
@@ -264,15 +462,27 @@ export function AdminDashboard() {
               {loading ? <Loader2 size={14} className="qodnSpinIcon" /> : <RefreshCw size={14} />}
               <span>Refresh</span>
             </button>
+
             <button
               type="button"
               className="secondaryButton"
+              disabled={filteredProfiles.length === 0}
+              onClick={handleExportUsersCsv}
+              style={{ display: "inline-flex", alignItems: "center", gap: "6px", padding: "7px 12px", fontSize: "12.5px" }}
+            >
+              <FileSpreadsheet size={14} />
+              <span>Export Users CSV</span>
+            </button>
+
+            <button
+              type="button"
+              className="primaryButton"
               disabled={filteredUsageLogs.length === 0}
-              onClick={handleExportCsv}
+              onClick={handleExportAuditCsv}
               style={{ display: "inline-flex", alignItems: "center", gap: "6px", padding: "7px 12px", fontSize: "12.5px" }}
             >
               <Download size={14} />
-              <span>Export Usage CSV</span>
+              <span>Export Audit CSV</span>
             </button>
           </div>
         </div>
@@ -298,7 +508,8 @@ export function AdminDashboard() {
                   <th style={{ padding: "8px 10px" }}>Status</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Conversions</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>CAD Exports</th>
-                  <th style={{ padding: "8px 10px", textAlign: "right" }}>Usage Events</th>
+                  <th style={{ padding: "8px 10px", textAlign: "right" }}>Events</th>
+                  <th style={{ padding: "8px 10px", textAlign: "right" }}>First Registered</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Last Sign-In</th>
                 </tr>
               </thead>
@@ -319,7 +530,7 @@ export function AdminDashboard() {
                         cursor: "pointer",
                         background: isSelected ? "rgba(22, 163, 74, 0.06)" : "transparent",
                       }}
-                      title="Click to filter usage logs for this user"
+                      title="Click to filter audit logs for this user"
                     >
                       <td style={{ padding: "10px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
@@ -376,6 +587,9 @@ export function AdminDashboard() {
                       <td style={{ padding: "10px", textAlign: "right", fontWeight: 700 }}>{stats.exports}</td>
                       <td style={{ padding: "10px", textAlign: "right", fontWeight: 700 }}>{stats.events}</td>
                       <td style={{ padding: "10px", textAlign: "right", color: "#64748b" }}>
+                        {new Date(p.created_at).toLocaleDateString()}
+                      </td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#64748b" }}>
                         {new Date(p.last_sign_in_at).toLocaleString()}
                       </td>
                     </tr>
@@ -387,17 +601,19 @@ export function AdminDashboard() {
         )}
       </div>
 
-      {/* Usage Telemetry Feed */}
+      {/* Audit & Usage Telemetry Feed */}
       <div className="panel" style={{ padding: "18px 20px" }}>
         <div className="activityToolbar" style={{ marginBottom: "12px" }}>
           <div className="activityFilterPills">
             {[
-              { id: "ALL", label: `All Events (${usageLogs.length})` },
+              { id: "ALL", label: `All Events (${filteredUsageLogs.length})` },
               { id: "KMZ_CONVERT", label: "KMZ Conversions" },
               { id: "EXPORT_DXF", label: "DXF Exports" },
               { id: "EXPORT_DWG", label: "DWG Exports" },
               { id: "OSM_ROADS_FETCH", label: "OSM Roads" },
               { id: "GOOGLE_SIGN_IN", label: "Sign-Ins" },
+              { id: "EULA_ACCEPTED", label: "EULA Accepted" },
+              { id: "APP_LAUNCH", label: "App Launches" },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -425,7 +641,11 @@ export function AdminDashboard() {
         ) : (
           <div className="activityList">
             {filteredUsageLogs.map((log) => {
-              const summary = typeof log.metadata?.summary === "string" ? log.metadata.summary : "";
+              const prof = profileByEmail.get(log.user_email.toLowerCase());
+              const summary = metaStr(log.metadata, "summary");
+              const company = metaStr(log.metadata, "companyName") || prof?.company_name || "";
+              const machineId = metaStr(log.metadata, "machineId");
+              const origin = metaStr(log.metadata, "origin");
               const isExport = log.action.startsWith("EXPORT_");
               return (
                 <div key={log.id} className="activityRowCard">
@@ -435,10 +655,17 @@ export function AdminDashboard() {
                   <div className="activityRowMain">
                     <div className="activityRowTop">
                       <strong>{log.user_email}</strong>
+                      {company && <span className="activityProviderBadge">{company}</span>}
                       <span className={`activityEventBadge ${isExport ? "export" : "convert"}`}>
                         {log.action.replace(/_/g, " ")}
                       </span>
                       {log.file_name && <span className="activityModeBadge">{log.file_name}</span>}
+                      {machineId && (
+                        <span className="activityModeBadge" title="Device / Browser Machine ID">
+                          ID: {machineId}
+                        </span>
+                      )}
+                      {origin && <span className="activityModeBadge">{origin}</span>}
                     </div>
                     <div className="activityRowSummary">{summary || `${log.mode || "pole_survey"} event`}</div>
                   </div>

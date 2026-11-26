@@ -11126,12 +11126,27 @@ async function logClientUsageEvent(payload: {
         metadata: {
           provider: payload.provider || "globe",
           summary: payload.summary || "",
+          fullName: gUser.name,
+          companyName: gUser.companyName || "",
+          machineId: client.machineId,
+          hostname: client.hostname,
+          platform: client.platform,
+          appVersion: "1.0.0",
+          origin: typeof window !== "undefined" ? window.location.origin : "",
+          eulaAccepted: (() => {
+            try {
+              return localStorage.getItem("ftth_eula_accepted_v1") === "true";
+            } catch {
+              return false;
+            }
+          })(),
+          licensor: "Caesar Ian Samulde",
           ...(payload.details || {}),
         },
       });
       if (
         payload.event &&
-        !["APP_LAUNCH", "WEB_SESSION_START", "TEST_PING", "GOOGLE_SIGN_IN"].includes(payload.event)
+        !["APP_LAUNCH", "WEB_SESSION_START", "TEST_PING", "GOOGLE_SIGN_IN", "EULA_ACCEPTED", "PROFILE_UPDATE"].includes(payload.event)
       ) {
         void insertQodnHistory(session.user.id, {
           userEmail: gUser.email,
@@ -14147,6 +14162,12 @@ function App() {
                       localStorage.setItem("ftth_eula_accepted_v1", "true");
                     } catch {}
                     setHasAcceptedEula(true);
+                    void logClientUsageEvent({
+                      event: "EULA_ACCEPTED",
+                      mode: converterMode,
+                      provider: telcoProvider,
+                      summary: `User accepted EULA & IP Reservation Terms (Licensor: Caesar Ian Samulde)`,
+                    });
                   }}
                 >
                   Accept &amp; Continue
