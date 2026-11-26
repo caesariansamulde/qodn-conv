@@ -36,6 +36,7 @@ import {
   type UserActivityItem,
 } from "./auth";
 import {
+  checkSupabaseAdminRole,
   clearQodnHistory,
   fetchQodnHistory,
   fetchQodnProfile,
@@ -46,6 +47,7 @@ import {
   supabase,
   upsertQodnProfile,
 } from "./supabaseDb";
+import { AdminDashboard } from "./AdminDashboard";
 import { buildRoadNetwork, offsetEdge, type RoadChainInput, type RoadCurbPiece } from "./roadNetwork";
 import { computePoleLayouts, type PoleLayoutResult, type RoadLabelBoxInput } from "./poleLayout";
 import { buildGridPagingBoxEntities } from "./gridPaging";
@@ -197,7 +199,7 @@ type ClassifiedPlacemark = Placemark & {
   poleId?: string;
 };
 
-export type ConverterMode = "pole_survey" | "hld_nap" | "excel_pic" | "activity";
+export type ConverterMode = "pole_survey" | "hld_nap" | "excel_pic" | "activity" | "admin";
 
 export type NapStatus = "PROPOSED" | "VETTED" | "SOURCE" | "EXISTING" | "DUMMY";
 
@@ -10140,6 +10142,10 @@ async function fetchOpenStreetMapResidentialContext(placemarks: ClassifiedPlacem
     .filter((placemark): placemark is ClassifiedPlacemark => placemark !== null);
 }
 
+const MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_KMZ_ENTRIES = 50;
+const MAX_TOTAL_KML_BYTES = 64 * 1024 * 1024;
+
 async function readSourceFile(fileOrFiles: File | File[] | FileList) {
   const files: File[] =
     fileOrFiles instanceof File
@@ -10152,19 +10158,45 @@ async function readSourceFile(fileOrFiles: File | File[] | FileList) {
 
   const allKmlTexts: Array<{ name: string; text: string }> = [];
   const validNames: string[] = [];
+  let totalKmlBytes = 0;
 
   for (const file of files) {
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      throw new Error(`File ${file.name} exceeds the 50 MB upload limit.`);
+    }
     validNames.push(file.name);
     const ext = file.name.toLowerCase().split(".").pop();
     if (ext === "kml") {
-      allKmlTexts.push({ name: file.name, text: await file.text() });
+      const text = await file.text();
+      totalKmlBytes += text.length;
+      if (totalKmlBytes > MAX_TOTAL_KML_BYTES) {
+        throw new Error("Uploaded KML content exceeds the 64 MB safety limit.");
+      }
+      allKmlTexts.push({ name: file.name, text });
       continue;
     }
     if (ext === "kmz") {
       const zip = await JSZip.loadAsync(file);
-      const kmlFiles = Object.values(zip.files).filter((entry) => entry.name.toLowerCase().endsWith(".kml"));
+      const entries = Object.values(zip.files);
+      if (entries.length > MAX_KMZ_ENTRIES * 10) {
+        throw new Error(`Archive ${file.name} contains too many entries.`);
+      }
+      const kmlFiles = entries.filter(
+        (entry) =>
+          !entry.dir &&
+          !entry.name.includes("..") &&
+          entry.name.toLowerCase().endsWith(".kml"),
+      );
+      if (kmlFiles.length > MAX_KMZ_ENTRIES) {
+        throw new Error(`Archive ${file.name} contains too many KML files.`);
+      }
       for (const entry of kmlFiles) {
-        allKmlTexts.push({ name: entry.name, text: await entry.async("text") });
+        const text = await entry.async("text");
+        totalKmlBytes += text.length;
+        if (totalKmlBytes > MAX_TOTAL_KML_BYTES) {
+          throw new Error("Extracted KML content exceeds the 64 MB safety limit.");
+        }
+        allKmlTexts.push({ name: entry.name, text });
       }
       continue;
     }
@@ -10703,27 +10735,40 @@ const GITHUB_GIST_KILLSWITCH_TEMPLATE = `{
   "message": "License revoked by author Caesar Ian Samulde. All company usage rights have been terminated."
 }`;
 
-const DEFAULT_WEB_WEBHOOK_URL =
-  "https://script.google.com/macros/s/AKfycbzcWyNP8xAHasoXaYkvRK_0Vcrm3HMDA7BtP226Kx2PIGEZTq-VtNNCGZw0faitNkuB/exec";
-const DEFAULT_WEB_KILLSWITCH_URL =
-  "https://script.google.com/macros/s/AKfycbzcWyNP8xAHasoXaYkvRK_0Vcrm3HMDA7BtP226Kx2PIGEZTq-VtNNCGZw0faitNkuB/exec";
+const DEFAULT_WEB_WEBHOOK_URL = "";
+const DEFAULT_WEB_KILLSWITCH_URL = "";
+
+function isAllowedHttpsUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 function getWebTelemetryConfig() {
   let webhookUrl = DEFAULT_WEB_WEBHOOK_URL;
   let killSwitchUrl = DEFAULT_WEB_KILLSWITCH_URL;
   try {
     const savedHook = localStorage.getItem("ftth_telemetry_webhook_url");
-    if (savedHook) webhookUrl = savedHook;
+    if (savedHook && isAllowedHttpsUrl(savedHook)) webhookUrl = savedHook;
     const savedKill = localStorage.getItem("ftth_telemetry_killswitch_url");
-    if (savedKill) killSwitchUrl = savedKill;
+    if (savedKill && isAllowedHttpsUrl(savedKill)) killSwitchUrl = savedKill;
   } catch {}
   return { webhookUrl, killSwitchUrl };
 }
 
 function saveWebTelemetryConfig(webhookUrl: string, killSwitchUrl: string) {
   try {
-    localStorage.setItem("ftth_telemetry_webhook_url", webhookUrl.trim());
-    localStorage.setItem("ftth_telemetry_killswitch_url", killSwitchUrl.trim());
+    const cleanHook = webhookUrl.trim();
+    const cleanKill = killSwitchUrl.trim();
+    if (!cleanHook) localStorage.removeItem("ftth_telemetry_webhook_url");
+    else if (isAllowedHttpsUrl(cleanHook)) localStorage.setItem("ftth_telemetry_webhook_url", cleanHook);
+    if (!cleanKill) localStorage.removeItem("ftth_telemetry_killswitch_url");
+    else if (isAllowedHttpsUrl(cleanKill)) localStorage.setItem("ftth_telemetry_killswitch_url", cleanKill);
   } catch {}
 }
 
@@ -11118,6 +11163,7 @@ function App() {
     getUserActivityHistory(getCurrentGoogleUser()?.email),
   );
   const [supabaseConnected, setSupabaseConnected] = useState(false);
+  const [isAdminUser, setIsAdminUser] = useState<boolean>(false);
   const [hasAcceptedEula, setHasAcceptedEula] = useState<boolean>(() => {
     try {
       return localStorage.getItem("ftth_eula_accepted_v1") === "true";
@@ -11272,12 +11318,14 @@ function App() {
           }
           if (active) setSupabaseConnected(true);
           if (active) setIsLoadingHistory(true);
-          const [dbProfile, dbHistory] = await Promise.all([
+          const [dbProfile, dbHistory, hasAdminClaim] = await Promise.all([
             fetchQodnProfile(session.user.id),
             fetchQodnHistory(session.user.id),
+            checkSupabaseAdminRole(),
           ]);
           if (!active) return;
           setIsLoadingHistory(false);
+          setIsAdminUser(hasAdminClaim);
           if (dbProfile) {
             const hydrated = mapSupabaseUserToProfile(session.user, dbProfile);
             setGoogleUser((prev) => {
@@ -11330,7 +11378,7 @@ function App() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              passkey: authorPasskey || "samulde2026",
+              passkey: authorPasskey,
               webhookUrl: webhookUrlInput.trim(),
               killSwitchUrl: killSwitchUrlInput.trim(),
               testPing: sendTestPing,
@@ -12220,11 +12268,17 @@ function App() {
           subtitle: "Upload Pole Survey & QODN HLD KMZ files to generate roads, poles, QODN box stencils, and 16-port residential lots.",
           loadedFile: result?.fileName || attachedHldFileName || null,
         }
-      : {
-          title: "Account & Conversion History",
-          subtitle: "Review your personal Google session, CAD export metrics, and recent engineering conversions.",
-          loadedFile: null,
-        };
+      : converterMode === "admin"
+        ? {
+            title: "Admin Console",
+            subtitle: "Monitor registered users, company profiles, and system-wide conversion telemetry.",
+            loadedFile: null,
+          }
+        : {
+            title: "Account & Conversion History",
+            subtitle: "Review your personal Google session, CAD export metrics, and recent engineering conversions.",
+            loadedFile: null,
+          };
 
   return (
     <main>
@@ -12313,6 +12367,16 @@ function App() {
                 <span>Activity &amp; History</span>
                 {userActivities.length > 0 && <span className="saasNavCount">{userActivities.length}</span>}
               </button>
+              {isAdminUser && (
+                <button
+                  type="button"
+                  className={`saasNavItem ${converterMode === "admin" ? "active" : ""}`}
+                  onClick={() => setConverterMode("admin")}
+                >
+                  <ShieldCheck size={17} />
+                  <span>Admin Console</span>
+                </button>
+              )}
             </nav>
 
             <div className="saasNavLabel" style={{ marginTop: "22px" }}>Resources &amp; Legal</div>
@@ -12427,7 +12491,9 @@ function App() {
               </div>
             </div>
 
-        {converterMode === "activity" ? (
+        {converterMode === "admin" && isAdminUser ? (
+          <AdminDashboard />
+        ) : converterMode === "activity" ? (
           <UserActivityHistoryView
             user={googleUser}
             activities={userActivities}
@@ -14257,33 +14323,44 @@ function App() {
                   </strong>
                   {!authorUnlocked && (
                     <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                      <input
-                        type="password"
-                        placeholder="Author Passkey..."
-                        value={authorPasskey}
-                        onChange={(e) => setAuthorPasskey(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && (authorPasskey === "samulde2026" || authorPasskey === "caesar2026")) {
-                            setAuthorUnlocked(true);
-                          }
-                        }}
-                        style={{ padding: "5px 10px", borderRadius: "6px", border: "1px solid var(--border-soft)", fontSize: "12px", width: "150px" }}
-                      />
-                      <button
-                        type="button"
-                        className="secondaryButton"
-                        style={{ padding: "5px 10px", fontSize: "12px" }}
-                        onClick={() => {
-                          if (authorPasskey === "samulde2026" || authorPasskey === "caesar2026") {
+                      {isAdminUser ? (
+                        <button
+                          type="button"
+                          className="secondaryButton"
+                          style={{ padding: "5px 10px", fontSize: "12px" }}
+                          onClick={() => {
                             setAuthorUnlocked(true);
                             setTelemetryStatusMsg("");
-                          } else {
-                            setTelemetryStatusMsg("❌ Invalid Author Passkey.");
-                          }
-                        }}
-                      >
-                        Unlock Controls
-                      </button>
+                          }}
+                        >
+                          Unlock Admin Controls
+                        </button>
+                      ) : (
+                        <>
+                          <input
+                            type="password"
+                            placeholder="Server Author Passkey..."
+                            value={authorPasskey}
+                            onChange={(e) => setAuthorPasskey(e.target.value)}
+                            style={{ padding: "5px 10px", borderRadius: "6px", border: "1px solid var(--border-soft)", fontSize: "12px", width: "160px" }}
+                          />
+                          <button
+                            type="button"
+                            className="secondaryButton"
+                            style={{ padding: "5px 10px", fontSize: "12px" }}
+                            onClick={() => {
+                              if (!authorPasskey.trim()) {
+                                setTelemetryStatusMsg("❌ Enter the server-configured author passkey.");
+                                return;
+                              }
+                              setAuthorUnlocked(true);
+                              setTelemetryStatusMsg("");
+                            }}
+                          >
+                            Unlock Controls
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>

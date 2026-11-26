@@ -280,3 +280,56 @@ export async function fetchQodnUsageLogs(userId: string, limit = 50): Promise<Qo
   if (error || !data) return [];
   return data as QodnUsageLogRow[];
 }
+
+
+export interface QodnHistoryRow {
+  id: string;
+  user_id: string;
+  user_email: string;
+  event: string;
+  mode: string;
+  provider: string | null;
+  file_name: string;
+  item_count: number;
+  summary: string;
+  created_at: string;
+}
+
+export async function checkSupabaseAdminRole(): Promise<boolean> {
+  if (!supabase) return false;
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) return false;
+  return data.user.app_metadata?.role === "admin";
+}
+
+export async function fetchAllQodnProfilesAdmin(): Promise<{ rows: QodnProfileRow[]; error?: string }> {
+  if (!supabase) return { rows: [], error: "Supabase is not configured." };
+  const { data, error } = await supabase
+    .from("qodn_profiles")
+    .select("*")
+    .order("last_sign_in_at", { ascending: false });
+  if (error) return { rows: [], error: error.message };
+  return { rows: (data || []) as QodnProfileRow[] };
+}
+
+export async function fetchAllQodnUsageLogsAdmin(limit = 300): Promise<{ rows: QodnUsageLogRow[]; error?: string }> {
+  if (!supabase) return { rows: [], error: "Supabase is not configured." };
+  const { data, error } = await supabase
+    .from("qodn_usage_logs")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) return { rows: [], error: error.message };
+  return { rows: (data || []) as QodnUsageLogRow[] };
+}
+
+export async function fetchAllQodnHistoryAdmin(limit = 300): Promise<{ rows: QodnHistoryRow[]; error?: string }> {
+  if (!supabase) return { rows: [], error: "Supabase is not configured." };
+  const { data, error } = await supabase
+    .from("qodn_conversion_history")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) return { rows: [], error: error.message };
+  return { rows: (data || []) as QodnHistoryRow[] };
+}

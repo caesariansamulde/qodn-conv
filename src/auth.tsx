@@ -544,6 +544,8 @@ export function GoogleLoginScreen({
         return;
       }
       setIsSigningIn(false);
+      setAuthError(error || "Google Sign-In failed. Please try again.");
+      return;
     }
 
     // 2. Check if server-side Kasbel Google OAuth redirect (/api/auth/google) is available
@@ -602,7 +604,12 @@ export function GoogleLoginScreen({
         // Fallback to interactive chooser modal
       }
     }
-    setShowGoogleModal(true);
+    setIsSigningIn(false);
+    if (import.meta.env.DEV) {
+      setShowGoogleModal(true);
+    } else {
+      setAuthError("Google Sign-In is required to access QuickODN Studio.");
+    }
   };
 
   const handleCompleteInteractiveGoogleSignIn = (e: React.FormEvent) => {

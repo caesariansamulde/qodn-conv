@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, release, arch, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -11,12 +11,27 @@ const workspaceRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 // You can set these defaults here before packaging the .exe, or update them
 // via the Author Telemetry Settings panel or environment variables.
 // ============================================================================
-const DEFAULT_WEBHOOK_URL =
-  process.env.FTTH_TELEMETRY_WEBHOOK_URL ||
-  "https://script.google.com/macros/s/AKfycbzcWyNP8xAHasoXaYkvRK_0Vcrm3HMDA7BtP226Kx2PIGEZTq-VtNNCGZw0faitNkuB/exec";
-const DEFAULT_KILLSWITCH_URL =
-  process.env.FTTH_LICENSE_KILLSWITCH_URL ||
-  "https://script.google.com/macros/s/AKfycbzcWyNP8xAHasoXaYkvRK_0Vcrm3HMDA7BtP226Kx2PIGEZTq-VtNNCGZw0faitNkuB/exec";
+const DEFAULT_WEBHOOK_URL = process.env.FTTH_TELEMETRY_WEBHOOK_URL || "";
+const DEFAULT_KILLSWITCH_URL = process.env.FTTH_LICENSE_KILLSWITCH_URL || "";
+
+function isAllowedHttpsUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    return parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function verifyAuthorPasskey(provided) {
+  const expected = process.env.FTTH_AUTHOR_PASSKEY || "";
+  if (!expected || typeof provided !== "string" || !provided) return false;
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 function getAppDataDir() {
   const localAppData =
@@ -81,9 +96,25 @@ export function loadTelemetryConfig() {
 
 export function saveTelemetryConfig(update) {
   const current = loadTelemetryConfig();
+  const nextWebhook =
+    typeof update.webhookUrl === "string"
+      ? update.webhookUrl.trim() === ""
+        ? ""
+        : isAllowedHttpsUrl(update.webhookUrl)
+          ? update.webhookUrl.trim()
+          : current.webhookUrl
+      : current.webhookUrl;
+  const nextKill =
+    typeof update.killSwitchUrl === "string"
+      ? update.killSwitchUrl.trim() === ""
+        ? ""
+        : isAllowedHttpsUrl(update.killSwitchUrl)
+          ? update.killSwitchUrl.trim()
+          : current.killSwitchUrl
+      : current.killSwitchUrl;
   const next = {
-    webhookUrl: typeof update.webhookUrl === "string" ? update.webhookUrl.trim() : current.webhookUrl,
-    killSwitchUrl: typeof update.killSwitchUrl === "string" ? update.killSwitchUrl.trim() : current.killSwitchUrl,
+    webhookUrl: nextWebhook,
+    killSwitchUrl: nextKill,
     updatedAt: new Date().toISOString(),
   };
   try {
@@ -434,7 +465,16 @@ export async function recordUsageEvent(eventData = {}) {
 function readJsonBody(request) {
   return new Promise((resolveBody, rejectBody) => {
     const chunks = [];
-    request.on("data", (chunk) => chunks.push(chunk));
+    let totalBytes = 0;
+    request.on("data", (chunk) => {
+      totalBytes += chunk.length;
+      if (totalBytes > 65536) {
+        rejectBody(new Error("Request payload too large."));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     request.on("end", () => {
       try {
         const raw = Buffer.concat(chunks).toString("utf8");
@@ -461,7 +501,7 @@ export async function handleUsageApiRequest(request, response) {
 
   if (request.method === "OPTIONS") {
     response.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": "http://127.0.0.1:5173",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     });
@@ -486,8 +526,6 @@ export async function handleUsageApiRequest(request, response) {
             hasKillSwitch: Boolean(config.killSwitchUrl),
             webhookConfigured: Boolean(config.webhookUrl),
             killSwitchConfigured: Boolean(config.killSwitchUrl),
-            webhookUrl: config.webhookUrl,
-            killSwitchUrl: config.killSwitchUrl,
             auditLogPath,
             updatedAt: config.updatedAt,
           },
@@ -508,9 +546,9 @@ export async function handleUsageApiRequest(request, response) {
     if (url === "/api/usage-config" && request.method === "POST") {
       const body = await readJsonBody(request);
       const providedKey = body.passkey || body.authorKey || "";
-      if (providedKey !== "samulde2026" && providedKey !== "caesar2026") {
+      if (!verifyAuthorPasskey(providedKey)) {
         response.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ error: "Invalid author passkey." }));
+        response.end(JSON.stringify({ error: "Invalid or unconfigured author passkey." }));
         return;
       }
       if (typeof body.manualRevoke === "boolean") {
