@@ -34,6 +34,10 @@ export interface QodnProfileRow {
   last_sign_in_at: string;
   created_at: string;
   updated_at: string;
+  is_revoked?: boolean;
+  revoke_reason?: string | null;
+  eula_accepted_at?: string | null;
+  eula_version?: string | null;
 }
 
 export interface QodnUsageLogRow {
@@ -332,4 +336,36 @@ export async function fetchAllQodnHistoryAdmin(limit = 300): Promise<{ rows: Qod
     .limit(limit);
   if (error) return { rows: [], error: error.message };
   return { rows: (data || []) as QodnHistoryRow[] };
+}
+
+export async function recordEulaAcceptance(userId: string, version = "v1.0.0"): Promise<void> {
+  if (!supabase) return;
+  try {
+    await supabase
+      .from("qodn_profiles")
+      .update({
+        eula_accepted_at: new Date().toISOString(),
+        eula_version: version,
+      })
+      .eq("id", userId);
+  } catch {
+    // Ignore if columns are not yet migrated
+  }
+}
+
+export async function setQodnUserRevokedAdmin(
+  targetUserId: string,
+  isRevoked: boolean,
+  reason = "",
+): Promise<{ ok: boolean; error?: string }> {
+  if (!supabase) return { ok: false, error: "Supabase is not configured." };
+  const { error } = await supabase
+    .from("qodn_profiles")
+    .update({
+      is_revoked: isRevoked,
+      revoke_reason: isRevoked ? reason.trim() || "Access revoked by administrator (Caesar Ian Samulde)." : null,
+    })
+    .eq("id", targetUserId);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
 }

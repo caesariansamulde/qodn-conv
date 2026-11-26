@@ -44,6 +44,7 @@ import {
   insertQodnHistory,
   insertQodnUsageLog,
   mapSupabaseUserToProfile,
+  recordEulaAcceptance,
   supabase,
   upsertQodnProfile,
 } from "./supabaseDb";
@@ -8315,11 +8316,29 @@ function createDxf(
     );
   }
 
+  const hasOsmNote = placemarks.some((placemark) => placemark.properties.source === "OpenStreetMap");
   entities.push(
     entityText(
       "FTTH_NOTES",
       "© 2026 Caesar Ian Samulde. All Rights Reserved. Reverse engineering, resale, and unauthorized copying are strictly prohibited.",
-      { ...noteAnchor, y: noteAnchor.y - noteLineGap * (placemarks.some((placemark) => placemark.properties.source === "OpenStreetMap") ? 5 : 4) },
+      { ...noteAnchor, y: noteAnchor.y - noteLineGap * (hasOsmNote ? 5 : 4) },
+      noteTextHeight,
+      0,
+      1,
+      Math.max(noteTextHeight * 12, 8),
+      undefined,
+      textStyle,
+    ),
+  );
+  const stampUser = getCurrentGoogleUser();
+  const stampText = stampUser
+    ? `Generated via QuickODN Studio (c) Caesar Ian Samulde | Licensed User: ${stampUser.name}${stampUser.companyName ? ` (${stampUser.companyName})` : ""} <${stampUser.email}> | ${new Date().toISOString()}`
+    : `Generated via QuickODN Studio (c) Caesar Ian Samulde | ${new Date().toISOString()}`;
+  entities.push(
+    entityText(
+      "FTTH_NOTES",
+      stampText,
+      { ...noteAnchor, y: noteAnchor.y - noteLineGap * (hasOsmNote ? 6 : 5) },
       noteTextHeight,
       0,
       1,
@@ -11179,6 +11198,7 @@ function App() {
   );
   const [supabaseConnected, setSupabaseConnected] = useState(false);
   const [isAdminUser, setIsAdminUser] = useState<boolean>(false);
+  const [userRevokedState, setUserRevokedState] = useState<{ revoked: boolean; reason?: string }>({ revoked: false });
   const [hasAcceptedEula, setHasAcceptedEula] = useState<boolean>(() => {
     try {
       return localStorage.getItem("ftth_eula_accepted_v1") === "true";
@@ -11342,6 +11362,10 @@ function App() {
           setIsLoadingHistory(false);
           setIsAdminUser(hasAdminClaim);
           if (dbProfile) {
+            setUserRevokedState({
+              revoked: Boolean(dbProfile.is_revoked),
+              reason: dbProfile.revoke_reason || undefined,
+            });
             const hydrated = mapSupabaseUserToProfile(session.user, dbProfile);
             setGoogleUser((prev) => {
               if (
@@ -12182,7 +12206,7 @@ function App() {
     }
   }
 
-  if (usageStatus?.revocation?.revoked) {
+  if (usageStatus?.revocation?.revoked || userRevokedState.revoked) {
     return (
       <div className="eulaDeclinedScreen">
         <div className="eulaDeclinedCard" style={{ borderColor: "#ef4444", maxWidth: "580px" }}>
@@ -12191,13 +12215,14 @@ function App() {
           </div>
           <h2 style={{ color: "#ef4444" }}>⛔ Software License Revoked & Terminated</h2>
           <p style={{ fontSize: "0.95rem", lineHeight: 1.6, color: "#e2ece5" }}>
-            {usageStatus.revocation.reason ||
+            {userRevokedState.reason ||
+              usageStatus?.revocation?.reason ||
               "Access to this software has been remotely revoked by the author and copyright holder, Caesar Ian Samulde. Under Section 3 & 4 of the End User License Agreement (Conditional Employment-Bound License), all company usage rights have immediately terminated."}
           </p>
           <div style={{ background: "#2a1515", border: "1px solid #7f1d1d", borderRadius: "8px", padding: "12px 14px", margin: "16px 0", textAlign: "left", fontSize: "0.82rem", color: "#fca5a5" }}>
             <strong>📋 Automated Audit Telemetry Notice:</strong>
             <p style={{ margin: "4px 0 0", color: "#fecaca" }}>
-              This execution attempt on workstation <code>{usageStatus.machine?.hostname}\{usageStatus.machine?.username}</code> (Machine ID: <code>{usageStatus.machine?.machineId}</code>) has been logged and transmitted to the copyright holder's audit server.
+              This execution attempt on workstation <code>{usageStatus?.machine?.hostname || "Web"}\{usageStatus?.machine?.username || googleUser?.email || "user"}</code> (Machine ID: <code>{usageStatus?.machine?.machineId || "WEB"}</code>) has been logged and transmitted to the copyright holder's audit server.
             </p>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "14px" }}>
@@ -14162,6 +14187,13 @@ function App() {
                       localStorage.setItem("ftth_eula_accepted_v1", "true");
                     } catch {}
                     setHasAcceptedEula(true);
+                    if (supabase) {
+                      void getActiveSupabaseSession().then((session) => {
+                        if (session?.user) {
+                          void recordEulaAcceptance(session.user.id, "v1.0.0");
+                        }
+                      });
+                    }
                     void logClientUsageEvent({
                       event: "EULA_ACCEPTED",
                       mode: converterMode,

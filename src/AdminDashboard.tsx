@@ -5,8 +5,10 @@ import {
   FileArchive,
   FileSpreadsheet,
   Loader2,
+  Printer,
   RefreshCw,
   Search,
+  ShieldAlert,
   ShieldCheck,
   Users,
   X,
@@ -16,6 +18,7 @@ import {
   fetchAllQodnHistoryAdmin,
   fetchAllQodnProfilesAdmin,
   fetchAllQodnUsageLogsAdmin,
+  setQodnUserRevokedAdmin,
   type QodnHistoryRow,
   type QodnProfileRow,
   type QodnUsageLogRow,
@@ -24,6 +27,14 @@ import {
 function csvEscape(v: unknown): string {
   const s = String(v ?? "");
   return `"${s.replace(/"/g, '""')}"`;
+}
+
+function escapeHtml(v: unknown): string {
+  return String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function metaStr(meta: Record<string, unknown> | undefined, key: string): string {
@@ -43,6 +54,7 @@ export function AdminDashboard() {
   const [companyFilter, setCompanyFilter] = useState<string>("ALL");
   const [dateRange, setDateRange] = useState<"ALL" | "24H" | "7D" | "30D">("ALL");
   const [actionFilter, setActionFilter] = useState<string>("ALL");
+  const [revokingId, setRevokingId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -232,7 +244,10 @@ export function AdminDashboard() {
       "Full Name",
       "Email",
       "Company",
-      "Status",
+      "Access Status",
+      "Revoke Reason",
+      "EULA Accepted (UTC)",
+      "EULA Version",
       "Conversions",
       "CAD Exports",
       "Usage Events",
@@ -252,7 +267,10 @@ export function AdminDashboard() {
           csvEscape(p.full_name || ""),
           csvEscape(p.email),
           csvEscape(p.company_name || ""),
-          csvEscape(p.profile_completed ? "Active" : "Onboarding"),
+          csvEscape(p.is_revoked ? "REVOKED" : p.profile_completed ? "Active" : "Onboarding"),
+          csvEscape(p.revoke_reason || ""),
+          csvEscape(p.eula_accepted_at || ""),
+          csvEscape(p.eula_version || ""),
           csvEscape(stats.conversions),
           csvEscape(stats.exports),
           csvEscape(stats.events),
@@ -268,6 +286,96 @@ export function AdminDashboard() {
     a.download = `qodn-registered-users-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function handleToggleRevoke(profile: QodnProfileRow) {
+    const nextRevoked = !profile.is_revoked;
+    const reason = nextRevoked
+      ? window.prompt(
+          `Revoke access for ${profile.email}? Enter reason (optional):`,
+          "Access revoked by author & copyright holder (Caesar Ian Samulde).",
+        )
+      : "";
+    if (nextRevoked && reason === null) return;
+    setRevokingId(profile.id);
+    const res = await setQodnUserRevokedAdmin(profile.id, nextRevoked, reason || "");
+    setRevokingId(null);
+    if (!res.ok) {
+      setErrorMsg(res.error || "Failed to update access status.");
+      return;
+    }
+    setProfiles((prev) =>
+      prev.map((p) =>
+        p.id === profile.id
+          ? { ...p, is_revoked: nextRevoked, revoke_reason: nextRevoked ? reason || null : null }
+          : p,
+      ),
+    );
+  }
+
+  function handlePrintEvidenceReport() {
+    const win = window.open("", "_blank", "width=1024,height=780");
+    if (!win) return;
+    const generatedAt = new Date().toISOString();
+    const userRowsHtml = filteredProfiles
+      .map((p) => {
+        const stats = userStatsByEmail.get(p.email.toLowerCase()) || { conversions: 0, exports: 0, events: 0 };
+        return `<tr>
+          <td>${escapeHtml(p.full_name || "Unnamed")}</td>
+          <td>${escapeHtml(p.email)}</td>
+          <td>${escapeHtml(p.company_name || "—")}</td>
+          <td>${escapeHtml(p.is_revoked ? "REVOKED" : p.profile_completed ? "Active" : "Onboarding")}</td>
+          <td>${escapeHtml(p.eula_accepted_at ? new Date(p.eula_accepted_at).toLocaleString() : "—")}</td>
+          <td style="text-align:right">${stats.conversions}</td>
+          <td style="text-align:right">${stats.exports}</td>
+          <td>${escapeHtml(new Date(p.created_at).toLocaleDateString())}</td>
+          <td>${escapeHtml(new Date(p.last_sign_in_at).toLocaleString())}</td>
+        </tr>`;
+      })
+      .join("");
+    const logRowsHtml = filteredUsageLogs
+      .slice(0, 200)
+      .map((log) => {
+        const prof = profileByEmail.get(log.user_email.toLowerCase());
+        const company = metaStr(log.metadata, "companyName") || prof?.company_name || "—";
+        const machineId = metaStr(log.metadata, "machineId") || "—";
+        const summary = metaStr(log.metadata, "summary") || log.mode || "";
+        return `<tr>
+          <td>${escapeHtml(new Date(log.created_at).toLocaleString())}</td>
+          <td>${escapeHtml(log.user_email)}</td>
+          <td>${escapeHtml(company)}</td>
+          <td>${escapeHtml(log.action)}</td>
+          <td>${escapeHtml(log.file_name || "—")}</td>
+          <td>${escapeHtml(machineId)}</td>
+          <td>${escapeHtml(summary)}</td>
+        </tr>`;
+      })
+      .join("");
+
+    win.document.write(`<!doctype html><html><head><title>QuickODN Studio — Audit & IP Evidence Report</title>
+      <style>
+        body { font-family: Arial, sans-serif; color: #0f172a; margin: 28px; font-size: 12px; }
+        h1 { font-size: 18px; margin: 0 0 4px; }
+        h2 { font-size: 14px; margin: 22px 0 8px; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; }
+        .meta { color: #475569; margin-bottom: 16px; line-height: 1.5; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; vertical-align: top; }
+        th { background: #f1f5f9; font-weight: 700; }
+        @media print { body { margin: 12px; } }
+      </style></head><body>
+      <h1>QuickODN Studio — Usage &amp; IP Ownership Evidence Report</h1>
+      <div class="meta">
+        <strong>Sole Author &amp; Copyright Owner:</strong> Caesar Ian Samulde (© 2026 All Rights Reserved)<br/>
+        <strong>Report Generated (UTC):</strong> ${escapeHtml(generatedAt)}<br/>
+        <strong>Scope:</strong> ${filteredProfiles.length} Registered Users • ${filteredUsageLogs.length} Audit Events (showing up to 200)
+      </div>
+      <h2>1. Registered Users &amp; EULA Acceptance</h2>
+      <table><thead><tr><th>Full Name</th><th>Email</th><th>Company</th><th>Status</th><th>EULA Signed</th><th>Conversions</th><th>Exports</th><th>Registered</th><th>Last Sign-In</th></tr></thead><tbody>${userRowsHtml}</tbody></table>
+      <h2>2. Append-Only Usage &amp; Audit Trail</h2>
+      <table><thead><tr><th>Timestamp</th><th>User Email</th><th>Company</th><th>Action</th><th>File</th><th>Machine ID</th><th>Summary</th></tr></thead><tbody>${logRowsHtml}</tbody></table>
+      <script>window.onload = function() { window.print(); };</script>
+      </body></html>`);
+    win.document.close();
   }
 
   return (
@@ -476,6 +584,17 @@ export function AdminDashboard() {
 
             <button
               type="button"
+              className="secondaryButton"
+              disabled={filteredProfiles.length === 0 && filteredUsageLogs.length === 0}
+              onClick={handlePrintEvidenceReport}
+              style={{ display: "inline-flex", alignItems: "center", gap: "6px", padding: "7px 12px", fontSize: "12.5px" }}
+            >
+              <Printer size={14} />
+              <span>Print / Save PDF Report</span>
+            </button>
+
+            <button
+              type="button"
               className="primaryButton"
               disabled={filteredUsageLogs.length === 0}
               onClick={handleExportAuditCsv}
@@ -506,11 +625,13 @@ export function AdminDashboard() {
                   <th style={{ padding: "8px 10px" }}>User</th>
                   <th style={{ padding: "8px 10px" }}>Company</th>
                   <th style={{ padding: "8px 10px" }}>Status</th>
+                  <th style={{ padding: "8px 10px" }}>EULA Signed</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Conversions</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>CAD Exports</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Events</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>First Registered</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Last Sign-In</th>
+                  <th style={{ padding: "8px 10px", textAlign: "right" }}>Access Control</th>
                 </tr>
               </thead>
               <tbody>
@@ -521,6 +642,7 @@ export function AdminDashboard() {
                     events: 0,
                   };
                   const isSelected = selectedEmail?.toLowerCase() === p.email.toLowerCase();
+                  const isSelfAdmin = p.email.toLowerCase() === "caesarsamulde@gmail.com";
                   return (
                     <tr
                       key={p.id}
@@ -576,12 +698,19 @@ export function AdminDashboard() {
                             borderRadius: "999px",
                             fontSize: "11px",
                             fontWeight: 700,
-                            background: p.profile_completed ? "rgba(22, 163, 74, 0.12)" : "rgba(245, 158, 11, 0.14)",
-                            color: p.profile_completed ? "#15803d" : "#b45309",
+                            background: p.is_revoked
+                              ? "rgba(220, 38, 38, 0.14)"
+                              : p.profile_completed
+                                ? "rgba(22, 163, 74, 0.12)"
+                                : "rgba(245, 158, 11, 0.14)",
+                            color: p.is_revoked ? "#dc2626" : p.profile_completed ? "#15803d" : "#b45309",
                           }}
                         >
-                          {p.profile_completed ? "Active" : "Onboarding"}
+                          {p.is_revoked ? "Revoked" : p.profile_completed ? "Active" : "Onboarding"}
                         </span>
+                      </td>
+                      <td style={{ padding: "10px", color: "#475569", fontSize: "11.5px" }}>
+                        {p.eula_accepted_at ? new Date(p.eula_accepted_at).toLocaleDateString() : "—"}
                       </td>
                       <td style={{ padding: "10px", textAlign: "right", fontWeight: 700 }}>{stats.conversions}</td>
                       <td style={{ padding: "10px", textAlign: "right", fontWeight: 700 }}>{stats.exports}</td>
@@ -591,6 +720,29 @@ export function AdminDashboard() {
                       </td>
                       <td style={{ padding: "10px", textAlign: "right", color: "#64748b" }}>
                         {new Date(p.last_sign_in_at).toLocaleString()}
+                      </td>
+                      <td style={{ padding: "10px", textAlign: "right" }} onClick={(e) => e.stopPropagation()}>
+                        {isSelfAdmin ? (
+                          <span style={{ fontSize: "11px", color: "#64748b", fontWeight: 600 }}>Owner</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="secondaryButton"
+                            disabled={revokingId === p.id || !hasAdminClaim}
+                            onClick={() => void handleToggleRevoke(p)}
+                            style={{
+                              padding: "4px 10px",
+                              fontSize: "11.5px",
+                              color: p.is_revoked ? "#15803d" : "#dc2626",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                            }}
+                          >
+                            <ShieldAlert size={12} />
+                            <span>{revokingId === p.id ? "Updating..." : p.is_revoked ? "Restore" : "Revoke"}</span>
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
