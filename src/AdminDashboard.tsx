@@ -101,19 +101,53 @@ export function AdminDashboard() {
   }, [profiles]);
 
   const userStatsByEmail = useMemo(() => {
-    const map = new Map<string, { conversions: number; exports: number; events: number }>();
+    const map = new Map<
+      string,
+      {
+        conversions: number;
+        exports: number;
+        events: number;
+        fingerprints: Set<string>;
+        latestDevice: string;
+        latestGpu: string;
+        latestTimezone: string;
+      }
+    >();
+    const getOrCreate = (key: string) => {
+      let cur = map.get(key);
+      if (!cur) {
+        cur = {
+          conversions: 0,
+          exports: 0,
+          events: 0,
+          fingerprints: new Set<string>(),
+          latestDevice: "",
+          latestGpu: "",
+          latestTimezone: "",
+        };
+        map.set(key, cur);
+      }
+      return cur;
+    };
     for (const h of historyRows) {
       const key = (h.user_email || "").toLowerCase();
-      const cur = map.get(key) || { conversions: 0, exports: 0, events: 0 };
+      const cur = getOrCreate(key);
       if (h.event === "KMZ_CONVERT") cur.conversions += 1;
       if (h.event.startsWith("EXPORT_")) cur.exports += 1;
-      map.set(key, cur);
     }
     for (const u of usageLogs) {
       const key = (u.user_email || "").toLowerCase();
-      const cur = map.get(key) || { conversions: 0, exports: 0, events: 0 };
+      const cur = getOrCreate(key);
       cur.events += 1;
-      map.set(key, cur);
+      const fp = metaStr(u.metadata, "deviceFingerprint");
+      if (fp) cur.fingerprints.add(fp);
+      if (!cur.latestDevice) {
+        const b = metaStr(u.metadata, "deviceBrowser");
+        const o = metaStr(u.metadata, "deviceOs");
+        if (b || o) cur.latestDevice = [b, o].filter(Boolean).join(" / ");
+      }
+      if (!cur.latestGpu) cur.latestGpu = metaStr(u.metadata, "deviceGpu");
+      if (!cur.latestTimezone) cur.latestTimezone = metaStr(u.metadata, "deviceTimezone");
     }
     return map;
   }, [historyRows, usageLogs]);
@@ -156,11 +190,15 @@ export function AdminDashboard() {
         const summary = metaStr(row.metadata, "summary");
         const company = metaStr(row.metadata, "companyName") || profileByEmail.get(row.user_email.toLowerCase())?.company_name || "";
         const machineId = metaStr(row.metadata, "machineId");
+        const deviceFp = metaStr(row.metadata, "deviceFingerprint");
+        const deviceGpu = metaStr(row.metadata, "deviceGpu");
         return (
           row.user_email.toLowerCase().includes(q) ||
           row.action.toLowerCase().includes(q) ||
           company.toLowerCase().includes(q) ||
           machineId.toLowerCase().includes(q) ||
+          deviceFp.toLowerCase().includes(q) ||
+          deviceGpu.toLowerCase().includes(q) ||
           (row.file_name || "").toLowerCase().includes(q) ||
           summary.toLowerCase().includes(q)
         );
@@ -196,6 +234,11 @@ export function AdminDashboard() {
       "Entity Count",
       "Origin",
       "Machine ID",
+      "Device Fingerprint",
+      "Browser / OS",
+      "GPU Renderer",
+      "Screen",
+      "Timezone",
       "Platform",
       "App Version",
       "EULA Accepted",
@@ -207,6 +250,9 @@ export function AdminDashboard() {
       const prof = profileByEmail.get(row.user_email.toLowerCase());
       const fullName = metaStr(row.metadata, "fullName") || prof?.full_name || "";
       const company = metaStr(row.metadata, "companyName") || prof?.company_name || "";
+      const browserOs = [metaStr(row.metadata, "deviceBrowser"), metaStr(row.metadata, "deviceOs")]
+        .filter(Boolean)
+        .join(" / ");
       lines.push(
         [
           csvEscape(row.id),
@@ -221,6 +267,11 @@ export function AdminDashboard() {
           csvEscape(row.entity_count ?? 0),
           csvEscape(metaStr(row.metadata, "origin")),
           csvEscape(metaStr(row.metadata, "machineId")),
+          csvEscape(metaStr(row.metadata, "deviceFingerprint")),
+          csvEscape(browserOs),
+          csvEscape(metaStr(row.metadata, "deviceGpu")),
+          csvEscape(metaStr(row.metadata, "deviceScreen")),
+          csvEscape(metaStr(row.metadata, "deviceTimezone")),
           csvEscape(metaStr(row.metadata, "platform")),
           csvEscape(metaStr(row.metadata, "appVersion")),
           csvEscape(row.metadata?.eulaAccepted === true ? "YES" : ""),
@@ -626,6 +677,7 @@ export function AdminDashboard() {
                   <th style={{ padding: "8px 10px" }}>Company</th>
                   <th style={{ padding: "8px 10px" }}>Status</th>
                   <th style={{ padding: "8px 10px" }}>EULA Signed</th>
+                  <th style={{ padding: "8px 10px" }}>Devices &amp; Hardware</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Conversions</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>CAD Exports</th>
                   <th style={{ padding: "8px 10px", textAlign: "right" }}>Events</th>
@@ -640,6 +692,10 @@ export function AdminDashboard() {
                     conversions: 0,
                     exports: 0,
                     events: 0,
+                    fingerprints: new Set<string>(),
+                    latestDevice: "",
+                    latestGpu: "",
+                    latestTimezone: "",
                   };
                   const isSelected = selectedEmail?.toLowerCase() === p.email.toLowerCase();
                   const isSelfAdmin = p.email.toLowerCase() === "caesarsamulde@gmail.com";
@@ -711,6 +767,19 @@ export function AdminDashboard() {
                       </td>
                       <td style={{ padding: "10px", color: "#475569", fontSize: "11.5px" }}>
                         {p.eula_accepted_at ? new Date(p.eula_accepted_at).toLocaleDateString() : "—"}
+                      </td>
+                      <td style={{ padding: "10px", fontSize: "11.5px", color: "#334155" }}>
+                        {stats.fingerprints.size > 0 ? (
+                          <div>
+                            <strong style={{ color: stats.fingerprints.size > 1 ? "#b45309" : "#0f172a" }}>
+                              {stats.fingerprints.size} {stats.fingerprints.size === 1 ? "Device" : "Devices"}
+                            </strong>
+                            {stats.latestDevice && <div style={{ color: "#64748b" }}>{stats.latestDevice}</div>}
+                            {stats.latestTimezone && <div style={{ color: "#64748b" }}>{stats.latestTimezone}</div>}
+                          </div>
+                        ) : (
+                          <span style={{ color: "#94a3b8" }}>—</span>
+                        )}
                       </td>
                       <td style={{ padding: "10px", textAlign: "right", fontWeight: 700 }}>{stats.conversions}</td>
                       <td style={{ padding: "10px", textAlign: "right", fontWeight: 700 }}>{stats.exports}</td>
@@ -797,6 +866,12 @@ export function AdminDashboard() {
               const summary = metaStr(log.metadata, "summary");
               const company = metaStr(log.metadata, "companyName") || prof?.company_name || "";
               const machineId = metaStr(log.metadata, "machineId");
+              const deviceFp = metaStr(log.metadata, "deviceFingerprint");
+              const deviceBrowser = metaStr(log.metadata, "deviceBrowser");
+              const deviceOs = metaStr(log.metadata, "deviceOs");
+              const deviceGpu = metaStr(log.metadata, "deviceGpu");
+              const deviceScreen = metaStr(log.metadata, "deviceScreen");
+              const deviceTz = metaStr(log.metadata, "deviceTimezone");
               const origin = metaStr(log.metadata, "origin");
               const isExport = log.action.startsWith("EXPORT_");
               return (
@@ -812,14 +887,28 @@ export function AdminDashboard() {
                         {log.action.replace(/_/g, " ")}
                       </span>
                       {log.file_name && <span className="activityModeBadge">{log.file_name}</span>}
-                      {machineId && (
+                      {deviceFp && (
+                        <span
+                          className="activityModeBadge"
+                          title={[deviceBrowser, deviceOs, deviceGpu, deviceScreen, deviceTz].filter(Boolean).join(" • ")}
+                        >
+                          {deviceFp}
+                        </span>
+                      )}
+                      {!deviceFp && machineId && (
                         <span className="activityModeBadge" title="Device / Browser Machine ID">
                           ID: {machineId}
                         </span>
                       )}
+                      {(deviceBrowser || deviceOs) && (
+                        <span className="activityModeBadge">{[deviceBrowser, deviceOs].filter(Boolean).join(" • ")}</span>
+                      )}
                       {origin && <span className="activityModeBadge">{origin}</span>}
                     </div>
-                    <div className="activityRowSummary">{summary || `${log.mode || "pole_survey"} event`}</div>
+                    <div className="activityRowSummary">
+                      {summary || `${log.mode || "pole_survey"} event`}
+                      {deviceGpu && deviceGpu !== "Unavailable" ? ` • GPU: ${deviceGpu}` : ""}
+                    </div>
                   </div>
                   <div className="activityRowRight">
                     <div className="activityCountPill">{(log.entity_count || 0).toLocaleString()} items</div>

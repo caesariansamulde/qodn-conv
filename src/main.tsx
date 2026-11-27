@@ -49,6 +49,7 @@ import {
   upsertQodnProfile,
 } from "./supabaseDb";
 import { AdminDashboard } from "./AdminDashboard";
+import { getDeviceFingerprint } from "./deviceFingerprint";
 import { buildRoadNetwork, offsetEdge, type RoadChainInput, type RoadCurbPiece } from "./roadNetwork";
 import { computePoleLayouts, type PoleLayoutResult, type RoadLabelBoxInput } from "./poleLayout";
 import { buildGridPagingBoxEntities } from "./gridPaging";
@@ -11134,7 +11135,7 @@ async function logClientUsageEvent(payload: {
   }
 
   if (supabase && gUser) {
-    void getActiveSupabaseSession().then((session) => {
+    void Promise.all([getActiveSupabaseSession(), getDeviceFingerprint()]).then(([session, fp]) => {
       if (!session?.user) return;
       void insertQodnUsageLog(session.user.id, {
         userEmail: gUser.email,
@@ -11148,6 +11149,14 @@ async function logClientUsageEvent(payload: {
           fullName: gUser.name,
           companyName: gUser.companyName || "",
           machineId: client.machineId,
+          deviceFingerprint: fp.fingerprint,
+          deviceBrowser: fp.browser,
+          deviceOs: fp.os,
+          deviceGpu: fp.gpu,
+          deviceScreen: fp.screen,
+          deviceTimezone: fp.timezone,
+          deviceCores: fp.cores,
+          deviceMemoryGb: fp.memoryGb,
           hostname: client.hostname,
           platform: client.platform,
           appVersion: "1.0.0",
