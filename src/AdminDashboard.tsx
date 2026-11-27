@@ -18,6 +18,8 @@ import {
   fetchAllQodnHistoryAdmin,
   fetchAllQodnProfilesAdmin,
   fetchAllQodnUsageLogsAdmin,
+  resetQodnUserDevicesAdmin,
+  setQodnUserApprovedAdmin,
   setQodnUserRevokedAdmin,
   type QodnHistoryRow,
   type QodnProfileRow,
@@ -233,6 +235,8 @@ export function AdminDashboard() {
       "File Name",
       "Entity Count",
       "Origin",
+      "IP Address",
+      "Country",
       "Machine ID",
       "Device Fingerprint",
       "Browser / OS",
@@ -266,6 +270,8 @@ export function AdminDashboard() {
           csvEscape(row.file_name || ""),
           csvEscape(row.entity_count ?? 0),
           csvEscape(metaStr(row.metadata, "origin")),
+          csvEscape(metaStr(row.metadata, "ipAddress")),
+          csvEscape(metaStr(row.metadata, "country")),
           csvEscape(metaStr(row.metadata, "machineId")),
           csvEscape(metaStr(row.metadata, "deviceFingerprint")),
           csvEscape(browserOs),
@@ -362,6 +368,30 @@ export function AdminDashboard() {
           : p,
       ),
     );
+  }
+
+  async function handleToggleApprove(profile: QodnProfileRow) {
+    const nextApproved = profile.is_approved === false;
+    setRevokingId(profile.id);
+    const res = await setQodnUserApprovedAdmin(profile.id, nextApproved);
+    setRevokingId(null);
+    if (!res.ok) {
+      setErrorMsg(res.error || "Failed to update approval status.");
+      return;
+    }
+    setProfiles((prev) => prev.map((p) => (p.id === profile.id ? { ...p, is_approved: nextApproved } : p)));
+  }
+
+  async function handleResetDevices(profile: QodnProfileRow) {
+    if (!window.confirm(`Reset authorized devices for ${profile.email}?`)) return;
+    setRevokingId(profile.id);
+    const res = await resetQodnUserDevicesAdmin(profile.id);
+    setRevokingId(null);
+    if (!res.ok) {
+      setErrorMsg(res.error || "Failed to reset devices.");
+      return;
+    }
+    setProfiles((prev) => prev.map((p) => (p.id === profile.id ? { ...p, registered_devices: [] } : p)));
   }
 
   function handlePrintEvidenceReport() {
@@ -756,13 +786,27 @@ export function AdminDashboard() {
                             fontWeight: 700,
                             background: p.is_revoked
                               ? "rgba(220, 38, 38, 0.14)"
-                              : p.profile_completed
-                                ? "rgba(22, 163, 74, 0.12)"
-                                : "rgba(245, 158, 11, 0.14)",
-                            color: p.is_revoked ? "#dc2626" : p.profile_completed ? "#15803d" : "#b45309",
+                              : p.is_approved === false
+                                ? "rgba(245, 158, 11, 0.16)"
+                                : p.profile_completed
+                                  ? "rgba(22, 163, 74, 0.12)"
+                                  : "rgba(100, 116, 139, 0.14)",
+                            color: p.is_revoked
+                              ? "#dc2626"
+                              : p.is_approved === false
+                                ? "#b45309"
+                                : p.profile_completed
+                                  ? "#15803d"
+                                  : "#475569",
                           }}
                         >
-                          {p.is_revoked ? "Revoked" : p.profile_completed ? "Active" : "Onboarding"}
+                          {p.is_revoked
+                            ? "Revoked"
+                            : p.is_approved === false
+                              ? "Pending Approval"
+                              : p.profile_completed
+                                ? "Active"
+                                : "Onboarding"}
                         </span>
                       </td>
                       <td style={{ padding: "10px", color: "#475569", fontSize: "11.5px" }}>
@@ -794,23 +838,49 @@ export function AdminDashboard() {
                         {isSelfAdmin ? (
                           <span style={{ fontSize: "11px", color: "#64748b", fontWeight: 600 }}>Owner</span>
                         ) : (
-                          <button
-                            type="button"
-                            className="secondaryButton"
-                            disabled={revokingId === p.id || !hasAdminClaim}
-                            onClick={() => void handleToggleRevoke(p)}
-                            style={{
-                              padding: "4px 10px",
-                              fontSize: "11.5px",
-                              color: p.is_revoked ? "#15803d" : "#dc2626",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "4px",
-                            }}
-                          >
-                            <ShieldAlert size={12} />
-                            <span>{revokingId === p.id ? "Updating..." : p.is_revoked ? "Restore" : "Revoke"}</span>
-                          </button>
+                          <div style={{ display: "inline-flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                            <button
+                              type="button"
+                              className="secondaryButton"
+                              disabled={revokingId === p.id || !hasAdminClaim}
+                              onClick={() => void handleToggleApprove(p)}
+                              style={{
+                                padding: "4px 8px",
+                                fontSize: "11px",
+                                color: p.is_approved === false ? "#15803d" : "#475569",
+                              }}
+                            >
+                              {p.is_approved === false ? "Approve" : "Unapprove"}
+                            </button>
+                            <button
+                              type="button"
+                              className="secondaryButton"
+                              disabled={revokingId === p.id || !hasAdminClaim}
+                              onClick={() => void handleResetDevices(p)}
+                              style={{ padding: "4px 8px", fontSize: "11px", color: "#0284c7" }}
+                              title="Reset registered device fingerprints"
+                            >
+                              Devices ({Array.isArray(p.registered_devices) ? p.registered_devices.length : 0}/
+                              {p.max_devices ?? 2})
+                            </button>
+                            <button
+                              type="button"
+                              className="secondaryButton"
+                              disabled={revokingId === p.id || !hasAdminClaim}
+                              onClick={() => void handleToggleRevoke(p)}
+                              style={{
+                                padding: "4px 8px",
+                                fontSize: "11px",
+                                color: p.is_revoked ? "#15803d" : "#dc2626",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "4px",
+                              }}
+                            >
+                              <ShieldAlert size={12} />
+                              <span>{revokingId === p.id ? "..." : p.is_revoked ? "Restore" : "Revoke"}</span>
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -872,6 +942,8 @@ export function AdminDashboard() {
               const deviceGpu = metaStr(log.metadata, "deviceGpu");
               const deviceScreen = metaStr(log.metadata, "deviceScreen");
               const deviceTz = metaStr(log.metadata, "deviceTimezone");
+              const ipAddr = metaStr(log.metadata, "ipAddress");
+              const country = metaStr(log.metadata, "country");
               const origin = metaStr(log.metadata, "origin");
               const isExport = log.action.startsWith("EXPORT_");
               return (
@@ -902,6 +974,12 @@ export function AdminDashboard() {
                       )}
                       {(deviceBrowser || deviceOs) && (
                         <span className="activityModeBadge">{[deviceBrowser, deviceOs].filter(Boolean).join(" • ")}</span>
+                      )}
+                      {ipAddr && (
+                        <span className="activityModeBadge">
+                          IP: {ipAddr}
+                          {country ? ` (${country})` : ""}
+                        </span>
                       )}
                       {origin && <span className="activityModeBadge">{origin}</span>}
                     </div>

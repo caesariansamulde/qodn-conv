@@ -45,6 +45,7 @@ import {
   insertQodnUsageLog,
   mapSupabaseUserToProfile,
   recordEulaAcceptance,
+  registerQodnDevice,
   supabase,
   upsertQodnProfile,
 } from "./supabaseDb";
@@ -11208,6 +11209,8 @@ function App() {
   const [supabaseConnected, setSupabaseConnected] = useState(false);
   const [isAdminUser, setIsAdminUser] = useState<boolean>(false);
   const [userRevokedState, setUserRevokedState] = useState<{ revoked: boolean; reason?: string }>({ revoked: false });
+  const [userApprovedState, setUserApprovedState] = useState<boolean>(true);
+  const [deviceLimitState, setDeviceLimitState] = useState<{ blocked: boolean; reason?: string }>({ blocked: false });
   const [hasAcceptedEula, setHasAcceptedEula] = useState<boolean>(() => {
     try {
       return localStorage.getItem("ftth_eula_accepted_v1") === "true";
@@ -11375,6 +11378,7 @@ function App() {
               revoked: Boolean(dbProfile.is_revoked),
               reason: dbProfile.revoke_reason || undefined,
             });
+            setUserApprovedState(hasAdminClaim || dbProfile.is_approved !== false);
             const hydrated = mapSupabaseUserToProfile(session.user, dbProfile);
             setGoogleUser((prev) => {
               if (
@@ -11386,6 +11390,16 @@ function App() {
                 return prev;
               }
               return hydrated;
+            });
+          }
+          if (!hasAdminClaim) {
+            void getDeviceFingerprint().then(async (fp) => {
+              const devCheck = await registerQodnDevice(fp.fingerprint);
+              if (active && !devCheck.allowed) {
+                setDeviceLimitState({ blocked: true, reason: devCheck.reason });
+              } else if (active) {
+                setDeviceLimitState({ blocked: false });
+              }
             });
           }
           if (dbHistory.length > 0) {
@@ -12215,16 +12229,19 @@ function App() {
     }
   }
 
-  if (usageStatus?.revocation?.revoked || userRevokedState.revoked) {
+  if (usageStatus?.revocation?.revoked || userRevokedState.revoked || deviceLimitState.blocked) {
     return (
       <div className="eulaDeclinedScreen">
         <div className="eulaDeclinedCard" style={{ borderColor: "#ef4444", maxWidth: "580px" }}>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: "16px" }}>
             <ShieldAlert size={52} color="#ef4444" />
           </div>
-          <h2 style={{ color: "#ef4444" }}>⛔ Software License Revoked & Terminated</h2>
+          <h2 style={{ color: "#ef4444" }}>
+            {deviceLimitState.blocked ? "⛔ Device Limit Reached" : "⛔ Software License Revoked & Terminated"}
+          </h2>
           <p style={{ fontSize: "0.95rem", lineHeight: 1.6, color: "#e2ece5" }}>
-            {userRevokedState.reason ||
+            {deviceLimitState.reason ||
+              userRevokedState.reason ||
               usageStatus?.revocation?.reason ||
               "Access to this software has been remotely revoked by the author and copyright holder, Caesar Ian Samulde. Under Section 3 & 4 of the End User License Agreement (Conditional Employment-Bound License), all company usage rights have immediately terminated."}
           </p>
@@ -12382,6 +12399,39 @@ function App() {
             setGoogleUser(null);
           }}
         />
+      ) : !userApprovedState && !isAdminUser ? (
+        <div className="eulaDeclinedScreen">
+          <div className="eulaDeclinedCard" style={{ borderColor: "#f59e0b", maxWidth: "560px" }}>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: "16px" }}>
+              <ShieldCheck size={52} color="#f59e0b" />
+            </div>
+            <h2 style={{ color: "#fbbf24" }}>Account Pending Administrator Approval</h2>
+            <p style={{ fontSize: "0.95rem", lineHeight: 1.6, color: "#e2ece5" }}>
+              Your account (<strong>{googleUser.email}</strong>) has been registered, but requires approval from{" "}
+              <strong>Caesar Ian Samulde</strong> before accessing QuickODN Studio.
+            </p>
+            <div style={{ display: "flex", gap: "10px", justifyContent: "center", marginTop: "18px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="primaryButton"
+                onClick={() => window.location.reload()}
+              >
+                Check Approval Status
+              </button>
+              <button
+                type="button"
+                className="secondaryButton"
+                onClick={async () => {
+                  await signOutGoogleUser();
+                  setSupabaseConnected(false);
+                  setGoogleUser(null);
+                }}
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </div>
       ) : (
       <div className="saasShell">
         <aside className="saasSidebar">

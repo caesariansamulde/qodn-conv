@@ -44,7 +44,12 @@ function dwgConvertPlugin() {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: "./",
   plugins: [react(), dwgConvertPlugin()],
-});
+  build: {
+    sourcemap: false,
+    minify: "esbuild",
+  },
+  esbuild: mode === "production" ? { drop: ["console", "debugger"] } : undefined,
+}));

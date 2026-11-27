@@ -38,6 +38,9 @@ export interface QodnProfileRow {
   revoke_reason?: string | null;
   eula_accepted_at?: string | null;
   eula_version?: string | null;
+  is_approved?: boolean;
+  max_devices?: number;
+  registered_devices?: string[];
 }
 
 export interface QodnUsageLogRow {
@@ -259,6 +262,21 @@ export async function insertQodnUsageLog(
 ): Promise<void> {
   if (!supabase) return;
   try {
+    const { data, error } = await supabase.functions.invoke("qodn-audit-log", {
+      body: {
+        userEmail: params.userEmail,
+        action: params.action,
+        mode: params.mode ?? null,
+        fileName: params.fileName ?? null,
+        entityCount: params.entityCount ?? 0,
+        metadata: params.metadata ?? {},
+      },
+    });
+    if (!error && data?.ok) return;
+  } catch {
+    // Fall back to direct insert if Edge Function is unavailable
+  }
+  try {
     await supabase.from("qodn_usage_logs").insert({
       user_id: userId,
       user_email: params.userEmail,
@@ -365,6 +383,55 @@ export async function setQodnUserRevokedAdmin(
       is_revoked: isRevoked,
       revoke_reason: isRevoked ? reason.trim() || "Access revoked by administrator (Caesar Ian Samulde)." : null,
     })
+    .eq("id", targetUserId);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function registerQodnDevice(
+  fingerprint: string,
+): Promise<{ allowed: boolean; deviceCount: number; maxDevices: number; reason?: string }> {
+  if (!supabase || !fingerprint) {
+    return { allowed: true, deviceCount: 0, maxDevices: 2 };
+  }
+  try {
+    const { data, error } = await supabase.rpc("qodn_register_device", {
+      p_fingerprint: fingerprint,
+    });
+    if (error || !data) {
+      return { allowed: true, deviceCount: 0, maxDevices: 2 };
+    }
+    return {
+      allowed: Boolean((data as { allowed?: boolean }).allowed ?? true),
+      deviceCount: Number((data as { device_count?: number }).device_count ?? 0),
+      maxDevices: Number((data as { max_devices?: number }).max_devices ?? 2),
+      reason: (data as { reason?: string }).reason,
+    };
+  } catch {
+    return { allowed: true, deviceCount: 0, maxDevices: 2 };
+  }
+}
+
+export async function setQodnUserApprovedAdmin(
+  targetUserId: string,
+  isApproved: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!supabase) return { ok: false, error: "Supabase is not configured." };
+  const { error } = await supabase
+    .from("qodn_profiles")
+    .update({ is_approved: isApproved })
+    .eq("id", targetUserId);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function resetQodnUserDevicesAdmin(
+  targetUserId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!supabase) return { ok: false, error: "Supabase is not configured." };
+  const { error } = await supabase
+    .from("qodn_profiles")
+    .update({ registered_devices: [] })
     .eq("id", targetUserId);
   if (error) return { ok: false, error: error.message };
   return { ok: true };
